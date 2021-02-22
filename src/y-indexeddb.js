@@ -64,17 +64,31 @@ export class IndexeddbPersistence extends Observable {
      */
     this.db = null
     this.synced = false
-    this._db = idb.openDB(name, db =>
+    const initDB = (/** @type {IDBDatabase} */ db) =>
       idb.createStores(db, [
         ['updates', { autoIncrement: true }],
         ['custom']
       ])
-    )
+    this._db = idb.openDB(name, initDB)
+    this.getDB = async () => {
+      this.db = await this._db
+      try {
+        this.db.transaction('updates').abort()
+        return this.db
+      } catch (e) {
+        // browser sometimes fails, we do a re-open
+        // console.log('idb create transaction failed, close and reopen...', e, this.db)
+      }
+      this.db.close()
+      // reopen
+      this._db = idb.openDB(name, initDB)
+      this.db = await this._db
+      return this.db
+    }
     /**
      * @type {Promise<IndexeddbPersistence>}
      */
-    this.whenSynced = this._db.then(db => {
-      this.db = db
+    this.whenSynced = this.getDB().then(db => {
       const currState = Y.encodeStateAsUpdate(doc)
       return fetchUpdates(this).then(updatesStore => idb.addAutoKey(updatesStore, currState)).then(() => {
         this.emit('synced', [this])
@@ -95,8 +109,8 @@ export class IndexeddbPersistence extends Observable {
      */
     this._storeUpdate = update =>
       this._mux(() => {
-        if (this.db) {
-          const [updatesStore] = idb.transact(/** @type {IDBDatabase} */ (this.db), [updatesStoreName])
+        this.getDB().then(db => {
+          const [updatesStore] = idb.transact(/** @type {IDBDatabase} */ db, [updatesStoreName])
           idb.addAutoKey(updatesStore, update)
           if (++this._dbsize >= PREFERRED_TRIM_SIZE) {
             // debounce store call
@@ -108,7 +122,7 @@ export class IndexeddbPersistence extends Observable {
               this._storeTimeoutId = null
             }, this._storeTimeout)
           }
-        }
+        })
       })
     doc.on('update', this._storeUpdate)
     this.destroy = this.destroy.bind(this)
@@ -118,6 +132,7 @@ export class IndexeddbPersistence extends Observable {
   destroy () {
     if (this._storeTimeoutId) {
       clearTimeout(this._storeTimeoutId)
+      this._storeTimeoutId = null
     }
     this.doc.off('update', this._storeUpdate)
     this.doc.off('destroy', this.destroy)
@@ -142,7 +157,7 @@ export class IndexeddbPersistence extends Observable {
    * @return {Promise<String | number | ArrayBuffer | Date | any>}
    */
   get (key) {
-    return this._db.then(db => {
+    return this.getDB().then(db => {
       const [custom] = idb.transact(db, [customStoreName], 'readonly')
       return idb.get(custom, key)
     })
@@ -154,7 +169,7 @@ export class IndexeddbPersistence extends Observable {
    * @return {Promise<String | number | ArrayBuffer | Date>}
    */
   set (key, value) {
-    return this._db.then(db => {
+    return this.getDB().then(db => {
       const [custom] = idb.transact(db, [customStoreName])
       return idb.put(custom, value, key)
     })
@@ -165,7 +180,7 @@ export class IndexeddbPersistence extends Observable {
    * @return {Promise<undefined>}
    */
   del (key) {
-    return this._db.then(db => {
+    return this.getDB().then(db => {
       const [custom] = idb.transact(db, [customStoreName])
       return idb.del(custom, key)
     })
